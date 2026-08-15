@@ -1,0 +1,243 @@
+function importLiturgicalWeekRanges() {
+  const ICS_URL = 'ICS URL HERE';
+  const OUT_SHEET = 'Liturgical Weeks';
+
+  const text = UrlFetchApp.fetch(ICS_URL).getContentText();
+  const events = parseICS(text);
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const cutoff = new Date(today.getFullYear(), 11, 31);
+
+  const detected = {};
+
+  for (var i = 0; i < events.length; i++) {
+    var e = events[i];
+    var summary = (e.SUMMARY || '').trim();
+    if (!summary || !e.DTSTART) continue;
+
+    var eventDate = parseICSDate(e.DTSTART);
+    if (!eventDate) continue;
+    eventDate.setHours(0, 0, 0, 0);
+
+    if (eventDate < today || eventDate > cutoff) continue;
+
+    var weekName = extractWeekName(summary);
+    if (!weekName) continue;
+
+    var monday = getMonday(eventDate);
+    var key = formatDateISO(monday);
+
+    detected[key] = {
+      startDate: monday,
+      weekName: weekName
+    };
+  }
+
+  var weeks = [];
+  for (var key in detected) {
+    weeks.push(detected[key]);
+  }
+
+  weeks.sort(function(a, b) {
+    return a.startDate - b.startDate;
+  });
+
+  if (weeks.length === 0) {
+    var ss0 = SpreadsheetApp.getActiveSpreadsheet();
+    var sheet0 = ss0.getSheetByName(OUT_SHEET) || ss0.insertSheet(OUT_SHEET);
+    sheet0.clearContents();
+    sheet0.getRange(1, 1, 1, 3).setValues([['Start Date', 'End Date', 'Week Name']]);
+    sheet0.getRange(2, 1).setValue('No liturgical week ranges found.');
+    return;
+  }
+
+  var completedWeeks = [];
+  for (var j = 0; j < weeks.length; j++) {
+    completedWeeks.push({
+      startDate: new Date(weeks[j].startDate.getTime()),
+      weekName: weeks[j].weekName
+    });
+  }
+
+  // Extend forward weekly until end of year
+  while (true) {
+    var last = completedWeeks[completedWeeks.length - 1];
+    var nextStart = addDays(last.startDate, 7);
+    if (nextStart > cutoff) break;
+
+    completedWeeks.push({
+      startDate: nextStart,
+      weekName: nextWeekName(last.weekName)
+    });
+  }
+
+  var rows = [];
+  for (var k = 0; k < completedWeeks.length; k++) {
+    var startDate = completedWeeks[k].startDate;
+    var endDate = addDays(startDate, 5); // Monday to Saturday
+    if (endDate > cutoff) endDate = new Date(cutoff.getTime());
+
+    rows.push([startDate, endDate, completedWeeks[k].weekName]);
+  }
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(OUT_SHEET);
+  if (!sheet) sheet = ss.insertSheet(OUT_SHEET);
+  sheet.clearContents();
+
+  sheet.getRange(1, 1, 1, 3).setValues([['Start Date', 'End Date', 'Week Name']]);
+
+  if (rows.length > 0) {
+    sheet.getRange(2, 1, rows.length, 3).setValues(rows);
+    sheet.getRange(2, 1, rows.length, 2).setNumberFormat('yyyy-mm-dd');
+    sheet.autoResizeColumns(1, 3);
+  }
+}
+
+function extractWeekName(summary) {
+  var s = summary.trim();
+  var m;
+
+  m = s.match(/\bweek\s+(\d+)\s+in\s+ordinary\s+time\b/i);
+  if (m) return 'Week ' + m[1] + ' in Ordinary Time';
+
+  m = s.match(/\b(\d+)(st|nd|rd|th)\s+week\s+of\s+advent\b/i);
+  if (m) return ordinal(m[1]) + ' Week of Advent';
+
+  m = s.match(/\b(\d+)(st|nd|rd|th)\s+week\s+of\s+lent\b/i);
+  if (m) return ordinal(m[1]) + ' Week of Lent';
+
+  m = s.match(/\b(\d+)(st|nd|rd|th)\s+week\s+of\s+easter(?:tide)?\b/i);
+  if (m) return ordinal(m[1]) + ' Week of Easter';
+
+  m = s.match(/\b(\d+)(st|nd|rd|th)\s+week\s+of\s+christmas\b/i);
+  if (m) return ordinal(m[1]) + ' Week of Christmas';
+
+  return null;
+}
+
+function nextWeekName(name) {
+  var m;
+
+  m = name.match(/^Week (\d+) in Ordinary Time$/i);
+  if (m) return 'Week ' + (Number(m[1]) + 1) + ' in Ordinary Time';
+
+  m = name.match(/^(\d+)(st|nd|rd|th) Week of Advent$/i);
+  if (m) return ordinal(Number(m[1]) + 1) + ' Week of Advent';
+
+  m = name.match(/^(\d+)(st|nd|rd|th) Week of Lent$/i);
+  if (m) return ordinal(Number(m[1]) + 1) + ' Week of Lent';
+
+  m = name.match(/^(\d+)(st|nd|rd|th) Week of Easter$/i);
+  if (m) return ordinal(Number(m[1]) + 1) + ' Week of Easter';
+
+  m = name.match(/^(\d+)(st|nd|rd|th) Week of Christmas$/i);
+  if (m) return ordinal(Number(m[1]) + 1) + ' Week of Christmas';
+
+  return name;
+}
+
+function ordinal(n) {
+  n = Number(n);
+  var mod10 = n % 10;
+  var mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return n + 'st';
+  if (mod10 === 2 && mod100 !== 12) return n + 'nd';
+  if (mod10 === 3 && mod100 !== 13) return n + 'rd';
+  return n + 'th';
+}
+
+function getMonday(date) {
+  var d = new Date(date.getTime());
+  var day = d.getDay();
+  var diff = (day === 0) ? -6 : (1 - day);
+  d.setDate(d.getDate() + diff);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function addDays(date, days) {
+  var d = new Date(date.getTime());
+  d.setDate(d.getDate() + days);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function parseICS(icsText) {
+  var lines = unfoldICSLines(icsText);
+  var events = [];
+  var current = null;
+
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+
+    if (line === 'BEGIN:VEVENT') {
+      current = {};
+      continue;
+    }
+
+    if (line === 'END:VEVENT') {
+      if (current) events.push(current);
+      current = null;
+      continue;
+    }
+
+    if (!current) continue;
+
+    var idx = line.indexOf(':');
+    if (idx === -1) continue;
+
+    var rawKey = line.substring(0, idx);
+    var value = line.substring(idx + 1);
+    var key = rawKey.split(';')[0];
+
+    current[key] = value;
+  }
+
+  return events;
+}
+
+function unfoldICSLines(icsText) {
+  var rawLines = icsText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+  var lines = [];
+
+  for (var i = 0; i < rawLines.length; i++) {
+    var line = rawLines[i];
+    if (/^[ \t]/.test(line) && lines.length) {
+      lines[lines.length - 1] += line.substring(1);
+    } else {
+      lines.push(line);
+    }
+  }
+
+  return lines;
+}
+
+function parseICSDate(value) {
+  if (!value) return null;
+
+  if (/^\d{8}$/.test(value)) {
+    var y = Number(value.slice(0, 4));
+    var m = Number(value.slice(4, 6)) - 1;
+    var d = Number(value.slice(6, 8));
+    return new Date(y, m, d);
+  }
+
+  if (/^\d{8}T\d{6}Z?$/.test(value)) {
+    var y2 = Number(value.slice(0, 4));
+    var m2 = Number(value.slice(4, 6)) - 1;
+    var d2 = Number(value.slice(6, 8));
+    return new Date(y2, m2, d2);
+  }
+
+  return null;
+}
+
+function formatDateISO(date) {
+  var y = date.getFullYear();
+  var m = String(date.getMonth() + 1).padStart(2, '0');
+  var d = String(date.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + d;
+}
